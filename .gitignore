@@ -1,0 +1,12 @@
+# Dữ liệu/scan thật - không đẩy lên GitHub
+DauVao/
+DauRa/
+Loi_OCR/
+*/DaXuLy/
+
+# Cấu hình máy cụ thể (đường dẫn mạng nội bộ) - tool tự tạo lại khi chạy lần đầu
+config.txt
+
+# Python
+__pycache__/
+*.pyc
