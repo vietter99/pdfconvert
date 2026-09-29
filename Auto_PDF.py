@@ -61,6 +61,32 @@ JPEG_QUALITY = 50
 # THỜI GIAN GIỮA MỖI LẦN TỰ ĐỘNG KIỂM TRA THƯ MỤC ĐẦU VÀO (GIÂY)
 WATCH_INTERVAL_SECONDS = 3
 
+def is_xoa_dangky_bien_phap(full_text):
+    """Nhận diện 'Phiếu yêu cầu xóa đăng ký biện pháp bảo đảm' (xóa thế chấp ngân hàng).
+    Kiểm tra 2 cụm từ RIÊNG LẺ (không đòi liền nhau) vì tiêu đề hay bị OCR/layout 2 cột
+    cắt rời 'biện pháp' và 'bảo đảm' ra 2 dòng khác nhau."""
+    has_xoa_dangky = re.search(r'x[oóòỏõ]a\s*đ[aăâ]ng\s*k[yý]', full_text, re.IGNORECASE)
+    has_bien_phap = re.search(r'bi[eệê]n\s*ph[aáà]p', full_text, re.IGNORECASE)
+    has_bao_dam = re.search(r'b[aả]o\s*[đd][aả]m', full_text, re.IGNORECASE)
+    return bool(has_xoa_dangky and (has_bien_phap or has_bao_dam))
+
+
+def extract_phat_hanh_number(full_text, so_luong_so):
+    """Lấy số GCN đầu tiên được liệt kê (dùng cho phiếu xóa đăng ký biện pháp bảo đảm -
+    không có 'Mã hồ sơ'). Tài liệu ghi số này theo 2 kiểu câu chữ khác nhau:
+    'Số phát hành: BN 589373' hoặc 'Giấy chứng nhận QSDĐ số BG 623746'."""
+    match = re.search(r'ph[aá]t\s*h[aà]nh[:.\s]*([A-ZĐ]{1,3}\s*\d{5,8})', full_text, re.IGNORECASE)
+    if not match:
+        match = re.search(
+            r'gi[aấ]y\s*ch[uứ]ng\s*nh[aậ]n[^\n]{0,40}?s[oố][:.\s]*([A-ZĐ]{1,3}\s*\d{5,8})',
+            full_text, re.IGNORECASE
+        )
+    if not match:
+        return None
+    raw = re.sub(r'[\s.\-:]', '', match.group(1).upper())
+    return raw[-so_luong_so:] if len(raw) >= so_luong_so else raw
+
+
 def extract_serial_number_3so(pdf_path):
     """[CHẾ ĐỘ 3 SỐ] Đọc các trang của PDF và tìm số phát hành bằng Tesseract"""
     try:
@@ -100,10 +126,21 @@ def extract_serial_number_3so(pdf_path):
                     # (?<![A-ZĐ]) đảm bảo không lấy chữ nằm cuối một từ viết hoa (tránh bắt nhầm CCCD thành CD)
                     match = re.search(r'(?<![A-ZĐ])([A-ZĐ]{1,2}\s*[-.:]?\s*\d{5,8})\b', text)
 
+                # BỘ LỌC RIÊNG CHO SỐ GCN DẠNG 'DĐ' (OCR hay đọc nhầm Đ thành 0/O,
+                # phá vỡ 2 mẫu regex trên vì thiếu đủ 5-8 chữ số liền sau prefix)
+                if not match:
+                    match = re.search(r'\b(D[BOĐ08]\s*[-.:]?\s*\d{6,8})\b', text, re.IGNORECASE)
+
                 if match:
                     first_raw_number = match.group(1).upper()
 
         doc.close()
+
+        # Phiếu xóa đăng ký biện pháp bảo đảm (xóa thế chấp ngân hàng): không có
+        # 'Mã hồ sơ', lấy số từ dòng 'phát hành: BN xxxxxx' của GCN đầu tiên liệt kê.
+        if is_xoa_dangky_bien_phap(full_text):
+            so_hieu = extract_phat_hanh_number(full_text, 3)
+            return so_hieu, True, full_text
 
         if first_raw_number is None:
             return None, False, full_text
@@ -119,12 +156,38 @@ def extract_serial_number_3so(pdf_path):
 
         # Phân loại thông minh: Phiếu (+) vs Bìa đỏ (không +) - dựa trên TOÀN BỘ nội dung
         is_phieu = False
-        keywords_phieu = r'(bi[eế]n đ[oộ]ng|đ[aấ]t s[oố]|phi[eế]u y[eê]u c[aầ]u)'
-        if re.search(keywords_phieu, full_text, re.IGNORECASE):
-            is_phieu = True
 
-        # Chỉ lấy 3 con số cuối cùng của mã số
-        clean_number = clean_number[-3:] if len(clean_number) >= 3 else clean_number
+        # Các từ khóa CỦA PHIẾU (chắc chắn là phiếu)
+        keywords_phieu = r'(phi[eế]u\s*th[aẩảâáàam]+\s*tra|phi[eế]u\s*chuy[eể]n\s*th[oô]ng\s*tin|phi[eế]u\s*y[eê]u\s*c[aầ]u|bi[eế]n\s*đ[oộ]ng)'
+        # Các từ khóa CỦA BÌA ĐỎ (chắc chắn là bìa)
+        keywords_bia = r'(gi[aấ]y\s*ch[uứ]ng\s*nh[aậ]n\s*quy[eề]n\s*s[uử]\s*d[uụ]ng\s*đ[aấ]t)'
+
+        if re.search(keywords_phieu, full_text, re.IGNORECASE):
+            # Đã chắc chắn là phiếu (tiêu đề/nội dung có từ khóa phiếu) -> giữ nguyên.
+            # KHÔNG dùng cụm 'giấy chứng nhận quyền sử dụng đất' để ghi đè về bìa đỏ nữa,
+            # vì phiếu thẩm tra/thẩm định nào cũng nhắc tới cụm này (đang cấp GCN).
+            is_phieu = True
+        elif re.search(keywords_bia, full_text, re.IGNORECASE):
+            is_phieu = False
+
+        # Phiếu (+): Lấy 3 số cuối từ Mã hồ sơ (VD: H15.50-260623-1231 -> lấy 231), KHÔNG lấy số GCN/bìa
+        if is_phieu:
+            ma_hs_match = re.search(r'M[aã]\s*h[oồ\s]*s[oơ\s]*[:.\-]?\s*([A-Za-z0-9.\-/_]+)', full_text, re.IGNORECASE)
+            if ma_hs_match:
+                ma_hs_str = ma_hs_match.group(1)
+                # Ưu tiên lấy 3 số nằm ngay sau cụm 6 số (ngày tháng, VD: 260623-1231)
+                id_match = re.search(r'\d{6}[^\d]*(\d{3,4})', ma_hs_str)
+                if id_match:
+                    clean_number = id_match.group(1)[-3:]
+                else:
+                    cln_ma = re.sub(r'[\s._]', '', ma_hs_str)
+                    cln_ma = cln_ma.split('/')[0].split('-')[-1]
+                    clean_number = cln_ma[-3:] if len(cln_ma) >= 3 else clean_number
+            else:
+                clean_number = clean_number[-3:] if len(clean_number) >= 3 else clean_number
+        else:
+            # Bìa đỏ: Chỉ lấy 3 con số cuối cùng của mã số GCN
+            clean_number = clean_number[-3:] if len(clean_number) >= 3 else clean_number
 
         return clean_number, is_phieu, full_text
     except Exception as e:
@@ -172,10 +235,21 @@ def extract_serial_number_4so(pdf_path):
                     # (?<![A-ZĐ]) đảm bảo không lấy chữ nằm cuối một từ viết hoa (tránh bắt nhầm CCCD thành CD)
                     match = re.search(r'(?<![A-ZĐ])([A-ZĐ]{1,2}\s*[-.:]?\s*\d{5,8})\b', text)
 
+                # BỘ LỌC RIÊNG CHO SỐ GCN DẠNG 'DĐ' (OCR hay đọc nhầm Đ thành 0/O,
+                # phá vỡ 2 mẫu regex trên vì thiếu đủ 5-8 chữ số liền sau prefix)
+                if not match:
+                    match = re.search(r'\b(D[BOĐ08]\s*[-.:]?\s*\d{6,8})\b', text, re.IGNORECASE)
+
                 if match:
                     first_raw_number = match.group(1).upper()
 
         doc.close()
+
+        # Phiếu xóa đăng ký biện pháp bảo đảm (xóa thế chấp ngân hàng): không có
+        # 'Mã hồ sơ', lấy số từ dòng 'phát hành: BN xxxxxx' của GCN đầu tiên liệt kê.
+        if is_xoa_dangky_bien_phap(full_text):
+            so_hieu = extract_phat_hanh_number(full_text, 4)
+            return so_hieu, True, full_text
 
         if first_raw_number is None:
             return None, False, full_text
@@ -198,10 +272,11 @@ def extract_serial_number_4so(pdf_path):
         keywords_bia = r'(gi[aấ]y\s*ch[uứ]ng\s*nh[aậ]n\s*quy[eề]n\s*s[uử]\s*d[uụ]ng\s*đ[aấ]t)'
 
         if re.search(keywords_phieu, full_text, re.IGNORECASE):
+            # Đã chắc chắn là phiếu (tiêu đề/nội dung có từ khóa phiếu) -> giữ nguyên.
+            # KHÔNG dùng cụm 'giấy chứng nhận quyền sử dụng đất' để ghi đè về bìa đỏ nữa,
+            # vì phiếu thẩm tra/thẩm định nào cũng nhắc tới cụm này (đang cấp GCN).
             is_phieu = True
-
-        # Nếu có chữ 'GIẤY CHỨNG NHẬN QUYỀN SỬ DỤNG ĐẤT' thì ưu tiên đây là bìa đỏ (không phải phiếu)
-        if re.search(keywords_bia, full_text, re.IGNORECASE):
+        elif re.search(keywords_bia, full_text, re.IGNORECASE):
             is_phieu = False
 
         # Xử lý lấy số cuối tùy theo loại
@@ -383,6 +458,40 @@ def process_one_file(filename, input_dir, output_dir, log_dir, processed_dir, ex
         print(f"{Fore.RED} [!] LỖI KHI XỬ LÝ: {filename} -> {e}")
 
 
+def process_one_file_giu_ten(filename, input_dir, output_dir, processed_dir):
+    """Chế độ 3: chỉ ép phẳng + nén, KHÔNG OCR, KHÔNG đổi tên -> giữ nguyên tên file gốc."""
+    input_path = os.path.join(input_dir, filename)
+    output_path = os.path.join(output_dir, filename)
+
+    # Đổi tên tự động nếu bị trùng file ở đầu ra (vẫn giữ tên gốc làm nền)
+    if os.path.exists(output_path):
+        base, ext = os.path.splitext(filename)
+        count = 1
+        while os.path.exists(os.path.join(output_dir, f"{base}_{count}{ext}")):
+            count += 1
+        output_path = os.path.join(output_dir, f"{base}_{count}{ext}")
+
+    try:
+        process_and_flatten_pdf(input_path, output_path)
+
+        # Lưu bản ĐÃ CONVERT (không phải file scan thô) vào 'DaXuLy' để lục lại sau
+        out_filename = os.path.basename(output_path)
+        archive_path = os.path.join(processed_dir, out_filename)
+        if os.path.exists(archive_path):
+            base, ext = os.path.splitext(out_filename)
+            count = 1
+            while os.path.exists(os.path.join(processed_dir, f"{base}_{count}{ext}")):
+                count += 1
+            archive_path = os.path.join(processed_dir, f"{base}_{count}{ext}")
+        shutil.copy2(output_path, archive_path)
+
+        os.remove(input_path)
+
+        print(f"{Fore.GREEN} [+] ĐÃ CONVERT (giữ nguyên tên): {filename} -> {os.path.basename(output_path)}")
+    except Exception as e:
+        print(f"{Fore.RED} [!] LỖI KHI XỬ LÝ: {filename} -> {e}")
+
+
 def main():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     input_dir, output_dir = load_config(base_dir)
@@ -402,13 +511,14 @@ def main():
     print(f"{Fore.CYAN}Thư mục đầu vào : {input_dir}")
     print(f"{Fore.CYAN}Thư mục đầu ra  : {output_dir}\n")
 
-    # CHỌN CHẾ ĐỘ TÁCH MÃ SỐ (chỉ hỏi 1 lần lúc khởi động)
-    print(f"{Fore.CYAN}Chọn chế độ xử lý mã số:")
-    print("  [1] Lấy 3 số cuối")
-    print("  [2] Lấy 4 số cuối")
+    # CHỌN CHẾ ĐỘ XỬ LÝ (chỉ hỏi 1 lần lúc khởi động)
+    print(f"{Fore.CYAN}Chọn chế độ xử lý:")
+    print("  [1] Lấy 3 số cuối (OCR đổi tên)")
+    print("  [2] Lấy 4 số cuối (OCR đổi tên)")
+    print("  [3] Chỉ nén, GIỮ NGUYÊN TÊN (không OCR, không đổi tên)")
     mode = ""
-    while mode not in ("1", "2"):
-        mode = input("Nhập lựa chọn (1 hoặc 2): ").strip()
+    while mode not in ("1", "2", "3"):
+        mode = input("Nhập lựa chọn (1, 2 hoặc 3): ").strip()
     extract_serial_number = extract_serial_number_3so if mode == "1" else extract_serial_number_4so
 
     print(f"\n{Fore.YELLOW}Đang theo dõi thư mục đầu vào, cứ {WATCH_INTERVAL_SECONDS} giây kiểm tra 1 lần.")
@@ -425,7 +535,10 @@ def main():
                 # Bỏ qua file scan đang ghi dở, để lần kiểm tra sau xử lý tiếp
                 if not is_file_stable(input_path):
                     continue
-                process_one_file(filename, input_dir, output_dir, log_dir, processed_dir, extract_serial_number)
+                if mode == "3":
+                    process_one_file_giu_ten(filename, input_dir, output_dir, processed_dir)
+                else:
+                    process_one_file(filename, input_dir, output_dir, log_dir, processed_dir, extract_serial_number)
 
             time.sleep(WATCH_INTERVAL_SECONDS)
     except KeyboardInterrupt:
