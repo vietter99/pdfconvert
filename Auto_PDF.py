@@ -36,7 +36,18 @@ colorama.init(autoreset=True)
 
 # --- 2. KIỂM TRA PHẦN MỀM TESSERACT-OCR ---
 TESSERACT_PATH = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-if not os.path.exists(TESSERACT_PATH):
+
+# Nếu có Tesseract thì gắn đường dẫn ngay (không thoát chương trình ở cấp module,
+# để file này import được từ giao diện GUI mà không bị tắt đột ngột).
+if os.path.exists(TESSERACT_PATH):
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+
+
+def kiem_tra_tesseract():
+    """Trả về True nếu đã cài Tesseract-OCR, ngược lại in hướng dẫn và trả về False."""
+    if os.path.exists(TESSERACT_PATH):
+        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+        return True
     print("\n" + "="*60)
     print(" [!] LỖI: CHƯA CÀI ĐẶT PHẦN MỀM NHẬN DIỆN CHỮ TESSERACT-OCR")
     print("="*60)
@@ -48,11 +59,7 @@ if not os.path.exists(TESSERACT_PATH):
     print("  hãy bấm dấu [+] ở mục 'Additional language data (download)'")
     print("  và TICK CHỌN 'Vietnamese' để máy đọc được tiếng Việt nhé!")
     print("="*60 + "\n")
-    input("Nhấn Enter để thoát và đi cài phần mềm...")
-    sys.exit()
-
-# CẤU HÌNH ĐƯỜNG DẪN TESSERACT
-pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+    return False
 
 # CHẤT LƯỢNG NÉN ẢNH TRONG PDF (0-100, càng thấp file càng nhẹ)
 # 50 = nén sâu, chữ vẫn đọc được, dung lượng nhẹ hơn nữa
@@ -85,6 +92,29 @@ def extract_phat_hanh_number(full_text, so_luong_so):
         return None
     raw = re.sub(r'[\s.\-:]', '', match.group(1).upper())
     return raw[-so_luong_so:] if len(raw) >= so_luong_so else raw
+
+
+def extract_ma_ho_so_tail(full_text, so_luong_so, fallback):
+    """Trích số định danh từ MÃ HỒ SƠ dạng H15.50.05.12-260924-1325 -> lấy nhóm số cuối
+    (phần sau cụm 6 số ngày tháng). Dùng cho mọi loại phiếu/biên bản có mã hồ sơ, kể cả khi
+    nhãn ghi là 'Mã hồ sơ', 'mã số hồ sơ' hay 'hồ sơ số'. fallback dùng khi không tìm thấy."""
+    # 1) Ưu tiên tìm theo nhãn (Mã/Mã số/hồ sơ số)
+    label = re.search(
+        r'(?:m[aã]\s*(?:s[oố]\s*)?h[oồ]\s*s[oơ]|h[oồ]\s*s[oơ]\s*s[oố])'
+        r'[^A-Za-z0-9]{0,6}([A-Za-z0-9.\-/_]+)',
+        full_text, re.IGNORECASE)
+    if label:
+        id_match = re.search(r'\d{6}[^\d]*(\d{3,4})', label.group(1))
+        if id_match:
+            return id_match.group(1)[-so_luong_so:]
+
+    # 2) Dự phòng: tìm mã hồ sơ đầu tiên trong toàn văn (6 số ngày tháng - nhóm 3/4 số)
+    code = re.search(r'\d{6}\s*[-.]\s*(\d{3,4})', full_text)
+    if code:
+        return code.group(1)[-so_luong_so:]
+
+    # 3) Không thấy mã hồ sơ -> dùng số dự phòng (số GCN đã bắt được)
+    return fallback[-so_luong_so:] if len(fallback) >= so_luong_so else fallback
 
 
 def extract_serial_number_3so(pdf_path):
@@ -157,8 +187,8 @@ def extract_serial_number_3so(pdf_path):
         # Phân loại thông minh: Phiếu (+) vs Bìa đỏ (không +) - dựa trên TOÀN BỘ nội dung
         is_phieu = False
 
-        # Các từ khóa CỦA PHIẾU (chắc chắn là phiếu)
-        keywords_phieu = r'(phi[eế]u\s*th[aẩảâáàam]+\s*tra|phi[eế]u\s*chuy[eể]n\s*th[oô]ng\s*tin|phi[eế]u\s*y[eê]u\s*c[aầ]u|bi[eế]n\s*đ[oộ]ng)'
+        # Các từ khóa CỦA PHIẾU (chắc chắn là phiếu, lấy số từ mã hồ sơ, thêm dấu +)
+        keywords_phieu = r'(phi[eế]u\s*th[aẩảâáàam]+\s*tra|phi[eế]u\s*chuy[eể]n\s*th[oô]ng\s*tin|phi[eế]u\s*y[eê]u\s*c[aầ]u|bi[eế]n\s*đ[oộ]ng|bi[eê]n\s*b[aả]n)'
         # Các từ khóa CỦA BÌA ĐỎ (chắc chắn là bìa)
         keywords_bia = r'(gi[aấ]y\s*ch[uứ]ng\s*nh[aậ]n\s*quy[eề]n\s*s[uử]\s*d[uụ]ng\s*đ[aấ]t)'
 
@@ -170,21 +200,9 @@ def extract_serial_number_3so(pdf_path):
         elif re.search(keywords_bia, full_text, re.IGNORECASE):
             is_phieu = False
 
-        # Phiếu (+): Lấy 3 số cuối từ Mã hồ sơ (VD: H15.50-260623-1231 -> lấy 231), KHÔNG lấy số GCN/bìa
         if is_phieu:
-            ma_hs_match = re.search(r'M[aã]\s*h[oồ\s]*s[oơ\s]*[:.\-]?\s*([A-Za-z0-9.\-/_]+)', full_text, re.IGNORECASE)
-            if ma_hs_match:
-                ma_hs_str = ma_hs_match.group(1)
-                # Ưu tiên lấy 3 số nằm ngay sau cụm 6 số (ngày tháng, VD: 260623-1231)
-                id_match = re.search(r'\d{6}[^\d]*(\d{3,4})', ma_hs_str)
-                if id_match:
-                    clean_number = id_match.group(1)[-3:]
-                else:
-                    cln_ma = re.sub(r'[\s._]', '', ma_hs_str)
-                    cln_ma = cln_ma.split('/')[0].split('-')[-1]
-                    clean_number = cln_ma[-3:] if len(cln_ma) >= 3 else clean_number
-            else:
-                clean_number = clean_number[-3:] if len(clean_number) >= 3 else clean_number
+            # Phiếu (+): lấy số từ MÃ HỒ SƠ, KHÔNG lấy số GCN/bìa
+            clean_number = extract_ma_ho_so_tail(full_text, 3, clean_number)
         else:
             # Bìa đỏ: Chỉ lấy 3 con số cuối cùng của mã số GCN
             clean_number = clean_number[-3:] if len(clean_number) >= 3 else clean_number
@@ -266,8 +284,8 @@ def extract_serial_number_4so(pdf_path):
         # Phân loại thông minh: Phiếu (+) vs Bìa đỏ (không +) - dựa trên TOÀN BỘ nội dung
         is_phieu = False
 
-        # Các từ khóa CỦA PHIẾU (chắc chắn là phiếu)
-        keywords_phieu = r'(phi[eế]u\s*th[aẩảâáàam]+\s*tra|phi[eế]u\s*chuy[eể]n\s*th[oô]ng\s*tin|phi[eế]u\s*y[eê]u\s*c[aầ]u|bi[eế]n\s*đ[oộ]ng)'
+        # Các từ khóa CỦA PHIẾU (chắc chắn là phiếu, lấy số từ mã hồ sơ, thêm dấu +)
+        keywords_phieu = r'(phi[eế]u\s*th[aẩảâáàam]+\s*tra|phi[eế]u\s*chuy[eể]n\s*th[oô]ng\s*tin|phi[eế]u\s*y[eê]u\s*c[aầ]u|bi[eế]n\s*đ[oộ]ng|bi[eê]n\s*b[aả]n)'
         # Các từ khóa CỦA BÌA ĐỎ (chắc chắn là bìa)
         keywords_bia = r'(gi[aấ]y\s*ch[uứ]ng\s*nh[aậ]n\s*quy[eề]n\s*s[uử]\s*d[uụ]ng\s*đ[aấ]t)'
 
@@ -279,24 +297,9 @@ def extract_serial_number_4so(pdf_path):
         elif re.search(keywords_bia, full_text, re.IGNORECASE):
             is_phieu = False
 
-        # Xử lý lấy số cuối tùy theo loại
         if is_phieu:
-            # Phiếu (+): Lấy 4 số cuối từ Mã hồ sơ (VD: H15.50-260623-1231 -> lấy 1231)
-            ma_hs_match = re.search(r'M[aã]\s*h[oồ\s]*s[oơ\s]*[:.\-]?\s*([A-Za-z0-9.\-/_]+)', full_text, re.IGNORECASE)
-            if ma_hs_match:
-                ma_hs_str = ma_hs_match.group(1)
-                # Ưu tiên lấy 4 số nằm ngay sau cụm 6 số (ngày tháng, VD: 260623-1231)
-                id_match = re.search(r'\d{6}[^\d]*(\d{4})', ma_hs_str)
-                if id_match:
-                    clean_number = id_match.group(1)
-                else:
-                    # Dự phòng: Lấy 4 số/chữ cuối cùng của chuỗi mã hồ sơ
-                    cln_ma = re.sub(r'[\s._]', '', ma_hs_str)
-                    # Bỏ các phần tử sau dấu / nếu có (VD: 1231/0367 -> lấy 1231)
-                    cln_ma = cln_ma.split('/')[0].split('-')[-1]
-                    clean_number = cln_ma[-4:] if len(cln_ma) >= 4 else clean_number
-            else:
-                clean_number = clean_number[-4:] if len(clean_number) >= 4 else clean_number
+            # Phiếu (+): lấy số từ MÃ HỒ SƠ, KHÔNG lấy số GCN/bìa
+            clean_number = extract_ma_ho_so_tail(full_text, 4, clean_number)
         else:
             # Bìa đỏ: Chỉ lấy 4 con số cuối cùng của mã số GCN
             clean_number = clean_number[-4:] if len(clean_number) >= 4 else clean_number
@@ -493,6 +496,10 @@ def process_one_file_giu_ten(filename, input_dir, output_dir, processed_dir):
 
 
 def main():
+    if not kiem_tra_tesseract():
+        input("Nhấn Enter để thoát và đi cài phần mềm...")
+        sys.exit()
+
     base_dir = os.path.dirname(os.path.abspath(__file__))
     input_dir, output_dir = load_config(base_dir)
     log_dir = os.path.join(base_dir, 'Loi_OCR')
