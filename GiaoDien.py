@@ -22,6 +22,8 @@ def _ensure_packages():
 _ensure_packages()
 
 import customtkinter as ctk
+import pymupdf as fitz
+from PIL import Image, ImageTk
 import Auto_PDF as core
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -82,6 +84,10 @@ class App(ctk.CTk):
         self._stat_ok  = 0
         self._stat_err = 0
         self._merge_files: list[str] = []
+        self._preview_visible = False
+        self._preview_doc = None
+        self._preview_page = 0
+        self._preview_photo = None
 
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -215,15 +221,31 @@ class App(ctk.CTk):
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
 
+        # Top bar: tool selector + preview toggle
+        top = ctk.CTkFrame(tab, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 10))
+        top.grid_columnconfigure(0, weight=1)
+
         self._tool_sel = ctk.CTkSegmentedButton(
-            tab,
+            top,
             values=["📎 Ghép PDF", "✂ Tách PDF", "↻ Xoay Trang", "ℹ Thông Tin"],
             command=self._switch_tool)
-        self._tool_sel.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 10))
+        self._tool_sel.grid(row=0, column=0, sticky="ew")
         self._tool_sel.set("📎 Ghép PDF")
 
-        container = ctk.CTkFrame(tab, fg_color="transparent")
-        container.grid(row=1, column=0, sticky="nsew")
+        self._preview_btn = ctk.CTkButton(
+            top, text="👁 Xem Trước", width=120,
+            command=self._toggle_preview)
+        self._preview_btn.grid(row=0, column=1, padx=(8, 0))
+
+        # Body: tools col 0, preview col 1
+        self._body_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        self._body_frame.grid(row=1, column=0, sticky="nsew")
+        self._body_frame.grid_columnconfigure(0, weight=3)
+        self._body_frame.grid_rowconfigure(0, weight=1)
+
+        container = ctk.CTkFrame(self._body_frame, fg_color="transparent")
+        container.grid(row=0, column=0, sticky="nsew")
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(0, weight=1)
 
@@ -241,11 +263,92 @@ class App(ctk.CTk):
             self._tool_frames[name] = f
 
         self._switch_tool("📎 Ghép PDF")
+        self._build_preview_panel()
 
     def _switch_tool(self, name):
         for f in self._tool_frames.values():
             f.grid_remove()
         self._tool_frames[name].grid()
+
+    # ── Preview panel ─────────────────────────────────────────────────────────
+    def _build_preview_panel(self):
+        self._preview_frame = ctk.CTkFrame(self._body_frame, width=300)
+        self._preview_frame.grid_rowconfigure(1, weight=1)
+        self._preview_frame.grid_columnconfigure(0, weight=1)
+
+        nav = ctk.CTkFrame(self._preview_frame, fg_color="transparent")
+        nav.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
+        ctk.CTkButton(nav, text="◀", width=32,
+                      command=lambda: self._preview_nav(-1)).pack(side="left")
+        self._page_label = ctk.CTkLabel(nav, text="— / —", width=80)
+        self._page_label.pack(side="left", expand=True)
+        ctk.CTkButton(nav, text="▶", width=32,
+                      command=lambda: self._preview_nav(1)).pack(side="left")
+
+        cf = ctk.CTkFrame(self._preview_frame)
+        cf.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        cf.grid_rowconfigure(0, weight=1)
+        cf.grid_columnconfigure(0, weight=1)
+
+        self._preview_canvas = tk.Canvas(cf, bg="#1a1a2e", highlightthickness=0)
+        vsb = tk.Scrollbar(cf, orient="vertical", command=self._preview_canvas.yview)
+        self._preview_canvas.configure(yscrollcommand=vsb.set)
+        self._preview_canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        self._preview_canvas.bind("<Configure>", lambda e: self._render_preview())
+
+    def _toggle_preview(self):
+        self._preview_visible = not self._preview_visible
+        if self._preview_visible:
+            self._body_frame.grid_columnconfigure(1, weight=2)
+            self._preview_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+            self._preview_btn.configure(text="✕ Ẩn Preview")
+            self.geometry("1200x760")
+            self._render_preview()
+        else:
+            self._preview_frame.grid_remove()
+            self._body_frame.grid_columnconfigure(1, weight=0)
+            self._preview_btn.configure(text="👁 Xem Trước")
+            self.geometry("840x760")
+
+    def _load_preview(self, path):
+        try:
+            if self._preview_doc:
+                self._preview_doc.close()
+            self._preview_doc = fitz.open(path)
+            self._preview_page = 0
+            if self._preview_visible:
+                self._render_preview()
+        except Exception:
+            pass
+
+    def _preview_nav(self, delta):
+        if not self._preview_doc:
+            return
+        total = len(self._preview_doc)
+        self._preview_page = max(0, min(total - 1, self._preview_page + delta))
+        self._render_preview()
+
+    def _render_preview(self):
+        if not self._preview_doc or not self._preview_visible:
+            return
+        doc = self._preview_doc
+        total = len(doc)
+        page = doc[self._preview_page]
+        self._page_label.configure(text=f"{self._preview_page + 1} / {total}")
+        cw = self._preview_canvas.winfo_width() or 280
+        if cw < 10:
+            cw = 280
+        scale = cw / page.rect.width
+        mat = fitz.Matrix(scale, scale)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        self._preview_photo = ImageTk.PhotoImage(img)
+        self._preview_canvas.configure(
+            scrollregion=(0, 0, pix.width, pix.height))
+        self._preview_canvas.delete("all")
+        self._preview_canvas.create_image(0, 0, anchor="nw",
+                                          image=self._preview_photo)
 
     # ── Ghép PDF ──────────────────────────────────────────────────────────────
     def _build_merge_tool(self, p):
@@ -565,6 +668,7 @@ class App(ctk.CTk):
         if p:
             entry.delete(0, "end")
             entry.insert(0, p)
+            self._load_preview(p)
 
     # ── Watch tab: log init & drain ───────────────────────────────────────────
     def _init_log_tags(self):
