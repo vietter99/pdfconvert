@@ -10,3 +10,15 @@ config.txt
 # Python
 __pycache__/
 *.pyc
+*.pyo
+
+# Local venv / installed packages
+Lib/
+Scripts/
+pyvenv.cfg
+
+# CodeGraph index (auto-generated)
+.codegraph/
+
+# Settings lưu đường dẫn cục bộ
+config.json

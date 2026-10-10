@@ -24,7 +24,7 @@ ensure_packages()
 import re
 import shutil
 import time
-import fitz  # PyMuPDF
+import pymupdf as fitz
 import pytesseract
 from PIL import Image
 import io
