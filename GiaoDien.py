@@ -25,6 +25,7 @@ import Auto_PDF as core
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_JSON = os.path.join(BASE_DIR, 'config.json')
+CORRECTIONS_JSON = os.path.join(BASE_DIR, 'ocr_corrections.json')
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 
 CLR_OK   = '#4ade80'
@@ -66,6 +67,27 @@ def load_settings():
 def save_settings(data):
     try:
         with open(CONFIG_JSON, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+_DEFAULT_CORRECTIONS = {"O": "0", "o": "0", "l": "1", "I": "1", "i": "1", "S": "5", "Z": "2"}
+
+
+def load_corrections():
+    if os.path.exists(CORRECTIONS_JSON):
+        try:
+            with open(CORRECTIONS_JSON, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return dict(_DEFAULT_CORRECTIONS)
+
+
+def save_corrections(data):
+    try:
+        with open(CORRECTIONS_JSON, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
@@ -216,17 +238,40 @@ class App(ctk.CTk):
                      font=ctk.CTkFont(weight="bold"),
                      text_color=CLR_INFO).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(ph, text="🔄 Làm mới", width=90,
-                      command=self._start_preview_rename).grid(row=0, column=1)
+                      command=self._start_preview_rename).grid(row=0, column=1, padx=(0, 6))
+        ctk.CTkButton(ph, text="⚙ Từ điển", width=90,
+                      command=self._open_corrections_editor).grid(row=0, column=2)
 
         self._preview_rename_box = ctk.CTkTextbox(
-            pf, font=ctk.CTkFont(family="Consolas", size=11), height=100)
-        self._preview_rename_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+            pf, font=ctk.CTkFont(family="Consolas", size=11), height=90)
+        self._preview_rename_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
         self._preview_rename_box.configure(state="disabled")
         pr_tb = self._preview_rename_box._textbox
         for tag, color in [('ok', CLR_OK), ('err', CLR_ERR),
                            ('warn', CLR_WARN), ('info', CLR_INFO), ('muted', CLR_MUTED)]:
             pr_tb.tag_config(tag, foreground=color)
         self._pr_insert("Nhấn 🔍 Xem Trước để quét thư mục đầu vào…", 'muted')
+
+        # Manual rename section
+        mr = ctk.CTkFrame(pf, fg_color="transparent")
+        mr.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        mr.grid_columnconfigure(1, weight=1)
+        _grey = dict(fg_color=("gray70", "gray30"), hover_color=("gray60", "gray40"),
+                     text_color=("black", "white"))
+        ctk.CTkLabel(mr, text="Sửa thủ công:", width=100,
+                     text_color=CLR_WARN).grid(row=0, column=0, columnspan=4, sticky="w",
+                                               pady=(0, 4))
+        ctk.CTkLabel(mr, text="File:", width=50).grid(row=1, column=0, sticky="w")
+        self._manual_src = ctk.CTkEntry(mr, placeholder_text="tên file gốc (trong DauVao)")
+        self._manual_src.grid(row=1, column=1, padx=(4, 4), sticky="ew")
+        ctk.CTkButton(mr, text="Chọn…", width=70,
+                      command=self._manual_pick_src, **_grey).grid(row=1, column=2)
+        ctk.CTkLabel(mr, text="Tên mới:", width=70).grid(row=2, column=0, sticky="w",
+                                                          pady=(4, 0))
+        self._manual_dst = ctk.CTkEntry(mr, placeholder_text="tên đặt lại (không cần .pdf)")
+        self._manual_dst.grid(row=2, column=1, padx=(4, 4), pady=(4, 0), sticky="ew")
+        ctk.CTkButton(mr, text="✓ Đổi tên", width=90,
+                      command=self._do_manual_rename).grid(row=2, column=2, pady=(4, 0))
 
         # Row 4: log header + clear button
         log_hdr = ctk.CTkFrame(tab, fg_color="transparent")
@@ -425,6 +470,14 @@ class App(ctk.CTk):
         tb.configure(state='disabled')
 
     # ── Rename preview ────────────────────────────────────────────────────────
+    def _apply_corrections(self, serial):
+        if not serial:
+            return serial
+        result = serial
+        for wrong, right in load_corrections().items():
+            result = result.replace(wrong, right)
+        return result
+
     def _start_preview_rename(self):
         input_dir = self.in_entry.get().strip()
         mode = self._current_mode()
@@ -450,17 +503,101 @@ class App(ctk.CTk):
             for filename in pdfs:
                 path = os.path.join(input_dir, filename)
                 try:
-                    serial = extract_fn(path)
+                    serial = self._apply_corrections(extract_fn(path))
                     if serial:
                         line, tag = f"  {filename}  →  {serial}.pdf", 'ok'
                     else:
-                        line, tag = f"  {filename}  →  OCR thất bại", 'err'
+                        line, tag = f"  {filename}  →  OCR thất bại (thêm vào Sửa thủ công)", 'err'
                 except Exception as e:
                     line, tag = f"  {filename}  →  Lỗi: {e}", 'err'
                 self.after(0, lambda l=line, t=tag: self._pr_insert(l, t))
             self.after(0, lambda: self._pr_insert("─ Xong ─", 'muted'))
 
         threading.Thread(target=run, daemon=True).start()
+
+    # ── Corrections editor ────────────────────────────────────────────────────
+    def _open_corrections_editor(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Từ điển sửa lỗi OCR")
+        win.geometry("440x380")
+        win.grab_set()
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(win,
+                     text='Định dạng JSON: {"ký_tự_sai": "ký_tự_đúng", …}\n'
+                          'VD: {"O":"0", "l":"1", "I":"1"} — áp dụng vào kết quả OCR trước khi lấy số',
+                     text_color=CLR_INFO,
+                     justify="left",
+                     wraplength=400).grid(row=0, column=0, padx=14, pady=(14, 4), sticky="w")
+
+        tb = ctk.CTkTextbox(win, font=ctk.CTkFont(family="Consolas", size=12))
+        tb.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        tb.insert('1.0', json.dumps(load_corrections(), ensure_ascii=False, indent=2))
+
+        def _save():
+            try:
+                data = json.loads(tb.get('1.0', 'end').strip())
+                if not isinstance(data, dict):
+                    raise ValueError("Phải là object JSON")
+                save_corrections(data)
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"JSON không hợp lệ:\n{e}", parent=win)
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.grid(row=2, column=0, pady=(0, 12))
+        ctk.CTkButton(btn_row, text="💾 Lưu", command=_save).pack(side="left", padx=8)
+        ctk.CTkButton(btn_row, text="Hủy", command=win.destroy,
+                      fg_color=("gray70", "gray30"),
+                      hover_color=("gray60", "gray40"),
+                      text_color=("black", "white")).pack(side="left", padx=8)
+
+    # ── Manual rename ─────────────────────────────────────────────────────────
+    def _manual_pick_src(self):
+        input_dir = self.in_entry.get().strip() or BASE_DIR
+        p = filedialog.askopenfilename(
+            title="Chọn file PDF cần đổi tên",
+            initialdir=input_dir,
+            filetypes=[("PDF files", "*.pdf")])
+        if p:
+            self._manual_src.delete(0, 'end')
+            self._manual_src.insert(0, os.path.basename(p))
+
+    def _do_manual_rename(self):
+        input_dir  = self.in_entry.get().strip()
+        output_dir = self.out_entry.get().strip() or os.path.join(BASE_DIR, 'DauRa')
+        src_name   = self._manual_src.get().strip()
+        dst_name   = self._manual_dst.get().strip()
+
+        if not src_name:
+            messagebox.showwarning("Thiếu", "Nhập tên file gốc."); return
+        if not dst_name:
+            messagebox.showwarning("Thiếu", "Nhập tên mới."); return
+        if not input_dir or not os.path.isdir(input_dir):
+            messagebox.showwarning("Thiếu", "Thư mục đầu vào không hợp lệ."); return
+
+        if not src_name.lower().endswith('.pdf'):
+            src_name += '.pdf'
+        if not dst_name.lower().endswith('.pdf'):
+            dst_name += '.pdf'
+
+        src_path = os.path.join(input_dir, src_name)
+        if not os.path.exists(src_path):
+            messagebox.showerror("Không tìm thấy",
+                                 f"File không tồn tại:\n{src_path}"); return
+
+        dst_path = os.path.join(output_dir, dst_name)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            os.rename(src_path, dst_path)
+            self._pr_insert(f"✓ Đổi tên: {src_name}  →  {dst_name}", 'ok')
+            self._stat_ok += 1
+            self._ok_var.set(str(self._stat_ok))
+            self._manual_src.delete(0, 'end')
+            self._manual_dst.delete(0, 'end')
+        except Exception as e:
+            messagebox.showerror("Lỗi đổi tên", str(e))
 
     def _on_close(self):
         self.stop_event.set()
