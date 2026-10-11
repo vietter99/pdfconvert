@@ -3,7 +3,6 @@ import sys
 import re
 import json
 import queue
-import shutil
 import threading
 import subprocess
 import tkinter as tk
@@ -22,8 +21,6 @@ def _ensure_packages():
 _ensure_packages()
 
 import customtkinter as ctk
-import pymupdf as fitz
-from PIL import Image, ImageTk
 import Auto_PDF as core
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -83,12 +80,6 @@ class App(ctk.CTk):
         self.stop_event = threading.Event()
         self._stat_ok  = 0
         self._stat_err = 0
-        self._merge_files: list[str] = []
-        self._preview_visible = False
-        self._preview_doc = None
-        self._preview_page = 0
-        self._preview_photo = None
-
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -142,14 +133,12 @@ class App(ctk.CTk):
         self._tabs = ctk.CTkTabview(self, anchor="nw")
         self._tabs.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 12))
         self._tabs.add("⚡  Theo Dõi Tự Động")
-        self._tabs.add("🔧  Công Cụ PDF")
         self._build_watch_tab(self._tabs.tab("⚡  Theo Dõi Tự Động"))
-        self._build_tools_tab(self._tabs.tab("🔧  Công Cụ PDF"))
 
     # ── Tab 1 : Theo Dõi ──────────────────────────────────────────────────────
     def _build_watch_tab(self, tab):
         tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(3, weight=1)
+        tab.grid_rowconfigure(5, weight=1)
         P = dict(padx=8, pady=(0, 10))
 
         # Thư mục đầu vào / đầu ra
@@ -199,476 +188,63 @@ class App(ctk.CTk):
         self._q_slider.grid(row=0, column=1, padx=12, sticky="ew")
         self._q_slider.set(self.settings['jpeg_quality'])
 
-        # Nút bắt đầu / dừng
+        # Row 2: action buttons
+        btn_row = ctk.CTkFrame(tab, fg_color="transparent")
+        btn_row.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        btn_row.grid_columnconfigure(0, weight=1)
+
         self._start_btn = ctk.CTkButton(
-            tab, text="▶  BẮT ĐẦU THEO DÕI", height=44,
+            btn_row, text="▶  BẮT ĐẦU THEO DÕI", height=44,
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self._toggle_watch)
-        self._start_btn.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 10))
+        self._start_btn.grid(row=0, column=0, sticky="ew")
         self._btn_fg    = self._start_btn.cget("fg_color")
         self._btn_hover = self._start_btn.cget("hover_color")
 
-        # Log box
+        ctk.CTkButton(btn_row, text="🔍 Xem Trước Đổi Tên", width=170, height=44,
+                      command=self._start_preview_rename).grid(row=0, column=1, padx=(8, 0))
+
+        # Row 3: rename preview area
+        pf = ctk.CTkFrame(tab)
+        pf.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
+        pf.grid_columnconfigure(0, weight=1)
+
+        ph = ctk.CTkFrame(pf, fg_color="transparent")
+        ph.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
+        ph.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(ph, text="Xem Trước Đổi Tên",
+                     font=ctk.CTkFont(weight="bold"),
+                     text_color=CLR_INFO).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(ph, text="🔄 Làm mới", width=90,
+                      command=self._start_preview_rename).grid(row=0, column=1)
+
+        self._preview_rename_box = ctk.CTkTextbox(
+            pf, font=ctk.CTkFont(family="Consolas", size=11), height=100)
+        self._preview_rename_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self._preview_rename_box.configure(state="disabled")
+        pr_tb = self._preview_rename_box._textbox
+        for tag, color in [('ok', CLR_OK), ('err', CLR_ERR),
+                           ('warn', CLR_WARN), ('info', CLR_INFO), ('muted', CLR_MUTED)]:
+            pr_tb.tag_config(tag, foreground=color)
+        self._pr_insert("Nhấn 🔍 Xem Trước để quét thư mục đầu vào…", 'muted')
+
+        # Row 4: log header + clear button
+        log_hdr = ctk.CTkFrame(tab, fg_color="transparent")
+        log_hdr.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 2))
+        log_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(log_hdr, text="📋 Nhật ký xử lý",
+                     font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(log_hdr, text="🗑 Xóa log", width=90,
+                      command=self._clear_log).grid(row=0, column=1)
+
+        # Row 5: log box
         self._log_box = ctk.CTkTextbox(
             tab, font=ctk.CTkFont(family="Consolas", size=12))
-        self._log_box.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 4))
+        self._log_box.grid(row=5, column=0, sticky="nsew", padx=8, pady=(0, 4))
         self._log_box.configure(state="disabled")
 
         self._on_mode_change(self._mode_btn.get())
 
-    # ── Tab 2 : Công Cụ PDF ───────────────────────────────────────────────────
-    def _build_tools_tab(self, tab):
-        tab.grid_columnconfigure(0, weight=1)
-        tab.grid_rowconfigure(1, weight=1)
-
-        # Top bar: tool selector + preview toggle
-        top = ctk.CTkFrame(tab, fg_color="transparent")
-        top.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 10))
-        top.grid_columnconfigure(0, weight=1)
-
-        self._tool_sel = ctk.CTkSegmentedButton(
-            top,
-            values=["📎 Ghép PDF", "✂ Tách PDF", "↻ Xoay Trang", "ℹ Thông Tin"],
-            command=self._switch_tool)
-        self._tool_sel.grid(row=0, column=0, sticky="ew")
-        self._tool_sel.set("📎 Ghép PDF")
-
-        self._preview_btn = ctk.CTkButton(
-            top, text="👁 Xem Trước", width=120,
-            command=self._toggle_preview)
-        self._preview_btn.grid(row=0, column=1, padx=(8, 0))
-
-        # Body: tools col 0, preview col 1
-        self._body_frame = ctk.CTkFrame(tab, fg_color="transparent")
-        self._body_frame.grid(row=1, column=0, sticky="nsew")
-        self._body_frame.grid_columnconfigure(0, weight=3)
-        self._body_frame.grid_rowconfigure(0, weight=1)
-
-        container = ctk.CTkFrame(self._body_frame, fg_color="transparent")
-        container.grid(row=0, column=0, sticky="nsew")
-        container.grid_columnconfigure(0, weight=1)
-        container.grid_rowconfigure(0, weight=1)
-
-        self._tool_frames: dict[str, ctk.CTkFrame] = {}
-        for name, builder in [
-            ("📎 Ghép PDF",   self._build_merge_tool),
-            ("✂ Tách PDF",   self._build_split_tool),
-            ("↻ Xoay Trang", self._build_rotate_tool),
-            ("ℹ Thông Tin",  self._build_info_tool),
-        ]:
-            f = ctk.CTkFrame(container, fg_color="transparent")
-            f.grid(row=0, column=0, sticky="nsew")
-            f.grid_columnconfigure(0, weight=1)
-            builder(f)
-            self._tool_frames[name] = f
-
-        self._switch_tool("📎 Ghép PDF")
-        self._build_preview_panel()
-
-    def _switch_tool(self, name):
-        for f in self._tool_frames.values():
-            f.grid_remove()
-        self._tool_frames[name].grid()
-
-    # ── Preview panel ─────────────────────────────────────────────────────────
-    def _build_preview_panel(self):
-        self._preview_frame = ctk.CTkFrame(self._body_frame, width=300)
-        self._preview_frame.grid_rowconfigure(1, weight=1)
-        self._preview_frame.grid_columnconfigure(0, weight=1)
-
-        nav = ctk.CTkFrame(self._preview_frame, fg_color="transparent")
-        nav.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
-        ctk.CTkButton(nav, text="◀", width=32,
-                      command=lambda: self._preview_nav(-1)).pack(side="left")
-        self._page_label = ctk.CTkLabel(nav, text="— / —", width=80)
-        self._page_label.pack(side="left", expand=True)
-        ctk.CTkButton(nav, text="▶", width=32,
-                      command=lambda: self._preview_nav(1)).pack(side="left")
-
-        cf = ctk.CTkFrame(self._preview_frame)
-        cf.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
-        cf.grid_rowconfigure(0, weight=1)
-        cf.grid_columnconfigure(0, weight=1)
-
-        self._preview_canvas = tk.Canvas(cf, bg="#1a1a2e", highlightthickness=0)
-        vsb = tk.Scrollbar(cf, orient="vertical", command=self._preview_canvas.yview)
-        self._preview_canvas.configure(yscrollcommand=vsb.set)
-        self._preview_canvas.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        self._preview_canvas.bind("<Configure>", lambda e: self._render_preview())
-
-    def _toggle_preview(self):
-        self._preview_visible = not self._preview_visible
-        if self._preview_visible:
-            self._body_frame.grid_columnconfigure(1, weight=2)
-            self._preview_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-            self._preview_btn.configure(text="✕ Ẩn Preview")
-            self.geometry("1200x760")
-            self._render_preview()
-        else:
-            self._preview_frame.grid_remove()
-            self._body_frame.grid_columnconfigure(1, weight=0)
-            self._preview_btn.configure(text="👁 Xem Trước")
-            self.geometry("840x760")
-
-    def _load_preview(self, path):
-        try:
-            if self._preview_doc:
-                self._preview_doc.close()
-            self._preview_doc = fitz.open(path)
-            self._preview_page = 0
-            if self._preview_visible:
-                self._render_preview()
-        except Exception:
-            pass
-
-    def _preview_nav(self, delta):
-        if not self._preview_doc:
-            return
-        total = len(self._preview_doc)
-        self._preview_page = max(0, min(total - 1, self._preview_page + delta))
-        self._render_preview()
-
-    def _render_preview(self):
-        if not self._preview_doc or not self._preview_visible:
-            return
-        doc = self._preview_doc
-        total = len(doc)
-        page = doc[self._preview_page]
-        self._page_label.configure(text=f"{self._preview_page + 1} / {total}")
-        cw = self._preview_canvas.winfo_width() or 280
-        if cw < 10:
-            cw = 280
-        scale = cw / page.rect.width
-        mat = fitz.Matrix(scale, scale)
-        pix = page.get_pixmap(matrix=mat)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        self._preview_photo = ImageTk.PhotoImage(img)
-        self._preview_canvas.configure(
-            scrollregion=(0, 0, pix.width, pix.height))
-        self._preview_canvas.delete("all")
-        self._preview_canvas.create_image(0, 0, anchor="nw",
-                                          image=self._preview_photo)
-
-    # ── Ghép PDF ──────────────────────────────────────────────────────────────
-    def _build_merge_tool(self, p):
-        p.grid_rowconfigure(1, weight=1)
-        P = dict(padx=8, pady=(0, 8))
-
-        # Nút điều khiển danh sách
-        btn_row = ctk.CTkFrame(p, fg_color="transparent")
-        btn_row.grid(row=0, column=0, sticky="ew", **P)
-        _grey = dict(fg_color=("gray70","gray30"), hover_color=("gray60","gray40"),
-                     text_color=("black","white"))
-        ctk.CTkButton(btn_row, text="+ Thêm file", width=110,
-                      command=self._merge_add).pack(side="left", padx=(0,6))
-        ctk.CTkButton(btn_row, text="− Xóa chọn", width=110,
-                      command=self._merge_remove, **_grey).pack(side="left", padx=(0,6))
-        ctk.CTkButton(btn_row, text="↑ Lên",   width=72,
-                      command=lambda: self._merge_move(-1), **_grey).pack(side="left", padx=(0,4))
-        ctk.CTkButton(btn_row, text="↓ Xuống", width=80,
-                      command=lambda: self._merge_move(1),  **_grey).pack(side="left")
-
-        # Listbox
-        lf = ctk.CTkFrame(p)
-        lf.grid(row=1, column=0, sticky="nsew", **P)
-        lf.grid_rowconfigure(0, weight=1)
-        lf.grid_columnconfigure(0, weight=1)
-
-        self._merge_lb = tk.Listbox(
-            lf, bg="#1e2130", fg="#d0d4e0",
-            selectbackground="#3b82f6", selectforeground="white",
-            relief="flat", bd=0, highlightthickness=0,
-            font=("Consolas", 11), activestyle="none")
-        sb = tk.Scrollbar(lf, command=self._merge_lb.yview)
-        self._merge_lb.config(yscrollcommand=sb.set)
-        self._merge_lb.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
-        sb.grid(row=0, column=1, sticky="ns", pady=6)
-
-        # Đầu ra
-        out_row = ctk.CTkFrame(p, fg_color="transparent")
-        out_row.grid(row=2, column=0, sticky="ew", **P)
-        out_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(out_row, text="Lưu ra:", width=70).grid(row=0, column=0, sticky="w")
-        self._merge_out = ctk.CTkEntry(out_row, placeholder_text="Chọn file đầu ra…")
-        self._merge_out.grid(row=0, column=1, padx=8, sticky="ew")
-        ctk.CTkButton(out_row, text="Chọn…", width=80,
-                      command=self._merge_pick_out).grid(row=0, column=2)
-
-        ctk.CTkButton(p, text="▶  GHÉP PDF", height=40,
-                      font=ctk.CTkFont(size=14, weight="bold"),
-                      command=self._do_merge).grid(row=3, column=0, sticky="ew", padx=8, pady=(4,4))
-        self._make_tool_log(p, 4, '_merge_log')
-
-    def _merge_add(self):
-        paths = filedialog.askopenfilenames(
-            title="Chọn file PDF để ghép",
-            filetypes=[("PDF files", "*.pdf")])
-        for path in paths:
-            if path not in self._merge_files:
-                self._merge_files.append(path)
-                self._merge_lb.insert("end", os.path.basename(path))
-
-    def _merge_remove(self):
-        sel = self._merge_lb.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        self._merge_lb.delete(idx)
-        self._merge_files.pop(idx)
-
-    def _merge_move(self, direction):
-        sel = self._merge_lb.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        new_idx = idx + direction
-        if new_idx < 0 or new_idx >= len(self._merge_files):
-            return
-        self._merge_files[idx], self._merge_files[new_idx] = \
-            self._merge_files[new_idx], self._merge_files[idx]
-        a = self._merge_lb.get(idx)
-        b = self._merge_lb.get(new_idx)
-        self._merge_lb.delete(idx);    self._merge_lb.insert(idx,     b)
-        self._merge_lb.delete(new_idx); self._merge_lb.insert(new_idx, a)
-        self._merge_lb.selection_set(new_idx)
-
-    def _merge_pick_out(self):
-        p = filedialog.asksaveasfilename(
-            title="Lưu file PDF ghép", defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")])
-        if p:
-            self._merge_out.delete(0, "end")
-            self._merge_out.insert(0, p)
-
-    def _do_merge(self):
-        if len(self._merge_files) < 2:
-            messagebox.showwarning("Thiếu file", "Cần ít nhất 2 file PDF để ghép.")
-            return
-        out_path = self._merge_out.get().strip()
-        if not out_path:
-            messagebox.showwarning("Thiếu đường dẫn", "Chọn file đầu ra trước.")
-            return
-        self._tlog('_merge_log', f"Đang ghép {len(self._merge_files)} file…", 'info')
-        files = list(self._merge_files)
-
-        def run():
-            try:
-                import tools as T
-                T.merge_pdfs(files, out_path)
-                size = os.path.getsize(out_path) / (1024 * 1024)
-                self.after(0, lambda: self._tlog(
-                    '_merge_log',
-                    f"✓ Xong → {os.path.basename(out_path)} ({size:.1f} MB)", 'ok'))
-            except Exception as e:
-                self.after(0, lambda: self._tlog('_merge_log', f"✗ Lỗi: {e}", 'err'))
-
-        threading.Thread(target=run, daemon=True).start()
-
-    # ── Tách PDF ──────────────────────────────────────────────────────────────
-    def _build_split_tool(self, p):
-        P = dict(padx=8, pady=(0, 8))
-        for i, (lbl, attr, ph, cmd) in enumerate([
-            ("File PDF:",           '_split_in',    "",                          self._split_pick_in),
-            ("Trang:",              '_split_range', "vd: 1-3,5,7-10 hoặc all",  None),
-            ("Lưu ra thư mục:",     '_split_out',   "",                          self._split_pick_out),
-        ]):
-            row = ctk.CTkFrame(p, fg_color="transparent")
-            row.grid(row=i, column=0, sticky="ew", **P)
-            row.grid_columnconfigure(1, weight=1)
-            ctk.CTkLabel(row, text=lbl, width=145, anchor="w").grid(row=0, column=0, sticky="w")
-            e = ctk.CTkEntry(row, placeholder_text=ph)
-            e.grid(row=0, column=1, padx=8, sticky="ew")
-            setattr(self, attr, e)
-            if cmd:
-                ctk.CTkButton(row, text="Chọn…", width=80, command=cmd).grid(row=0, column=2)
-
-        ctk.CTkButton(p, text="▶  TÁCH PDF", height=40,
-                      font=ctk.CTkFont(size=14, weight="bold"),
-                      command=self._do_split).grid(row=3, column=0, sticky="ew", padx=8, pady=(4,4))
-        self._make_tool_log(p, 4, '_split_log')
-
-    def _split_pick_in(self):
-        self._pick_pdf_into(self._split_in)
-
-    def _split_pick_out(self):
-        d = filedialog.askdirectory(title="Chọn thư mục lưu kết quả")
-        if d:
-            self._split_out.delete(0, "end")
-            self._split_out.insert(0, d)
-
-    def _do_split(self):
-        in_path   = self._split_in.get().strip()
-        ranges    = self._split_range.get().strip()
-        out_dir   = self._split_out.get().strip()
-        if not in_path:
-            messagebox.showwarning("Thiếu", "Chọn file PDF đầu vào."); return
-        if not ranges:
-            messagebox.showwarning("Thiếu", "Nhập dải trang."); return
-        if not out_dir:
-            messagebox.showwarning("Thiếu", "Chọn thư mục đầu ra."); return
-        self._tlog('_split_log', f"Đang tách: {os.path.basename(in_path)}…", 'info')
-
-        def run():
-            try:
-                import tools as T
-                files = T.split_pdf(in_path, out_dir, ranges)
-                self.after(0, lambda: self._tlog(
-                    '_split_log', f"✓ Tách xong → {len(files)} file trong {out_dir}", 'ok'))
-            except Exception as e:
-                self.after(0, lambda: self._tlog('_split_log', f"✗ Lỗi: {e}", 'err'))
-
-        threading.Thread(target=run, daemon=True).start()
-
-    # ── Xoay Trang ────────────────────────────────────────────────────────────
-    def _build_rotate_tool(self, p):
-        P = dict(padx=8, pady=(0, 8))
-
-        # File đầu vào
-        r0 = ctk.CTkFrame(p, fg_color="transparent")
-        r0.grid(row=0, column=0, sticky="ew", **P)
-        r0.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(r0, text="File PDF:", width=120, anchor="w").grid(row=0, column=0, sticky="w")
-        self._rot_in = ctk.CTkEntry(r0)
-        self._rot_in.grid(row=0, column=1, padx=8, sticky="ew")
-        ctk.CTkButton(r0, text="Chọn…", width=80,
-                      command=lambda: self._pick_pdf_into(self._rot_in)).grid(row=0, column=2)
-
-        # Trang
-        r1 = ctk.CTkFrame(p, fg_color="transparent")
-        r1.grid(row=1, column=0, sticky="ew", **P)
-        r1.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(r1, text="Trang:", width=120, anchor="w").grid(row=0, column=0, sticky="w")
-        self._rot_pages = ctk.CTkEntry(r1, placeholder_text="all  hoặc  1-3,5")
-        self._rot_pages.grid(row=0, column=1, padx=8, sticky="ew")
-
-        # Góc xoay
-        r2 = ctk.CTkFrame(p, fg_color="transparent")
-        r2.grid(row=2, column=0, sticky="ew", **P)
-        ctk.CTkLabel(r2, text="Góc xoay:", width=120, anchor="w").grid(
-            row=0, column=0, sticky="w", padx=(8, 0))
-        self._rot_angle = ctk.CTkSegmentedButton(r2, values=["90°", "180°", "270°"])
-        self._rot_angle.set("90°")
-        self._rot_angle.grid(row=0, column=1, padx=8, sticky="w")
-
-        # File đầu ra
-        r3 = ctk.CTkFrame(p, fg_color="transparent")
-        r3.grid(row=3, column=0, sticky="ew", **P)
-        r3.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(r3, text="Lưu ra:", width=120, anchor="w").grid(row=0, column=0, sticky="w")
-        self._rot_out = ctk.CTkEntry(r3, placeholder_text="Để trống = ghi đè file gốc")
-        self._rot_out.grid(row=0, column=1, padx=8, sticky="ew")
-        ctk.CTkButton(r3, text="Chọn…", width=80,
-                      command=self._rot_pick_out).grid(row=0, column=2)
-
-        ctk.CTkButton(p, text="▶  XOAY TRANG", height=40,
-                      font=ctk.CTkFont(size=14, weight="bold"),
-                      command=self._do_rotate).grid(row=4, column=0, sticky="ew", padx=8, pady=(4,4))
-        self._make_tool_log(p, 5, '_rot_log')
-
-    def _rot_pick_out(self):
-        path = filedialog.asksaveasfilename(
-            title="Lưu file PDF", defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")])
-        if path:
-            self._rot_out.delete(0, "end")
-            self._rot_out.insert(0, path)
-
-    def _do_rotate(self):
-        in_path   = self._rot_in.get().strip()
-        pages_str = self._rot_pages.get().strip() or 'all'
-        angle     = int(self._rot_angle.get().rstrip('°'))
-        out_path  = self._rot_out.get().strip() or in_path
-        if not in_path:
-            messagebox.showwarning("Thiếu", "Chọn file PDF."); return
-        self._tlog('_rot_log', f"Đang xoay trang {pages_str} @ {angle}°…", 'info')
-
-        def run():
-            try:
-                import tools as T
-                if out_path == in_path:
-                    tmp = in_path + '._tmp_rot.pdf'
-                    T.rotate_pages(in_path, tmp, pages_str, angle)
-                    shutil.move(tmp, in_path)
-                    result = in_path
-                else:
-                    T.rotate_pages(in_path, out_path, pages_str, angle)
-                    result = out_path
-                self.after(0, lambda: self._tlog(
-                    '_rot_log', f"✓ Xong → {os.path.basename(result)}", 'ok'))
-            except Exception as e:
-                self.after(0, lambda: self._tlog('_rot_log', f"✗ Lỗi: {e}", 'err'))
-
-        threading.Thread(target=run, daemon=True).start()
-
-    # ── Thông Tin ─────────────────────────────────────────────────────────────
-    def _build_info_tool(self, p):
-        p.grid_rowconfigure(1, weight=1)
-        P = dict(padx=8, pady=(0, 8))
-
-        r0 = ctk.CTkFrame(p, fg_color="transparent")
-        r0.grid(row=0, column=0, sticky="ew", **P)
-        r0.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(r0, text="File PDF:", width=80, anchor="w").grid(row=0, column=0, sticky="w")
-        self._info_in = ctk.CTkEntry(r0)
-        self._info_in.grid(row=0, column=1, padx=8, sticky="ew")
-        ctk.CTkButton(r0, text="Chọn…", width=80,
-                      command=lambda: self._pick_pdf_into(self._info_in)).grid(row=0, column=2)
-        ctk.CTkButton(r0, text="📋 Xem", width=70,
-                      command=self._do_info).grid(row=0, column=3, padx=(6, 0))
-
-        self._make_tool_log(p, 1, '_info_log')
-
-    def _do_info(self):
-        in_path = self._info_in.get().strip()
-        if not in_path:
-            messagebox.showwarning("Thiếu", "Chọn file PDF."); return
-        try:
-            import tools as T
-            info = T.pdf_info(in_path)
-            lines = [
-                f"File    : {os.path.basename(in_path)}",
-                f"Số trang: {info['page_count']}",
-                f"Dung lượng: {info['file_size_mb']:.2f} MB",
-                "─" * 36,
-            ]
-            for pg in info['pages'][:30]:
-                lines.append(f"  Trang {pg['num']:>3}: {pg['w']} × {pg['h']} pt")
-            if info['page_count'] > 30:
-                lines.append(f"  … (còn {info['page_count'] - 30} trang)")
-            for line in lines:
-                self._tlog('_info_log', line, 'info')
-        except Exception as e:
-            self._tlog('_info_log', f"✗ Lỗi: {e}", 'err')
-
-    # ── Tool log helpers ──────────────────────────────────────────────────────
-    def _make_tool_log(self, parent, row, attr):
-        log = ctk.CTkTextbox(parent, font=ctk.CTkFont(family="Consolas", size=11), height=130)
-        log.grid(row=row, column=0, sticky="nsew", padx=8, pady=(0, 4))
-        log.configure(state="disabled")
-        setattr(self, attr, log)
-        tb = log._textbox
-        tb.tag_config('ok',   foreground=CLR_OK)
-        tb.tag_config('err',  foreground=CLR_ERR)
-        tb.tag_config('warn', foreground=CLR_WARN)
-        tb.tag_config('info', foreground=CLR_INFO)
-
-    def _tlog(self, attr, msg, tag='info'):
-        log = getattr(self, attr)
-        tb = log._textbox
-        tb.configure(state='normal')
-        tb.insert('end', msg + '\n', tag)
-        tb.see('end')
-        tb.configure(state='disabled')
-
-    # ── Shared helper ─────────────────────────────────────────────────────────
-    def _pick_pdf_into(self, entry):
-        p = filedialog.askopenfilename(title="Chọn file PDF",
-                                       filetypes=[("PDF files", "*.pdf")])
-        if p:
-            entry.delete(0, "end")
-            entry.insert(0, p)
-            self._load_preview(p)
 
     # ── Watch tab: log init & drain ───────────────────────────────────────────
     def _init_log_tags(self):
@@ -827,6 +403,64 @@ class App(ctk.CTk):
         finally:
             sys.stdout = old_stdout
             self.after(0, lambda: self._set_running(False))
+
+    # ── Log helpers ───────────────────────────────────────────────────────────
+    def _clear_log(self):
+        tb = self._log_box._textbox
+        tb.configure(state='normal')
+        tb.delete('1.0', 'end')
+        tb.configure(state='disabled')
+
+    def _pr_insert(self, msg, tag='info'):
+        tb = self._preview_rename_box._textbox
+        tb.configure(state='normal')
+        tb.insert('end', msg + '\n', tag)
+        tb.see('end')
+        tb.configure(state='disabled')
+
+    def _pr_clear(self):
+        tb = self._preview_rename_box._textbox
+        tb.configure(state='normal')
+        tb.delete('1.0', 'end')
+        tb.configure(state='disabled')
+
+    # ── Rename preview ────────────────────────────────────────────────────────
+    def _start_preview_rename(self):
+        input_dir = self.in_entry.get().strip()
+        mode = self._current_mode()
+
+        self._pr_clear()
+        if not input_dir or not os.path.isdir(input_dir):
+            self._pr_insert("Thư mục đầu vào không hợp lệ.", 'err')
+            return
+        if mode == '3':
+            self._pr_insert("Chế độ Giữ nguyên tên — không đổi tên file.", 'muted')
+            return
+
+        pdfs = sorted(f for f in os.listdir(input_dir) if f.lower().endswith('.pdf'))
+        if not pdfs:
+            self._pr_insert("Không có file PDF nào trong thư mục đầu vào.", 'warn')
+            return
+
+        self._pr_insert(f"Quét {len(pdfs)} file… (OCR mỗi file ~1-3 giây)", 'info')
+        extract_fn = (core.extract_serial_number_3so if mode == '1'
+                      else core.extract_serial_number_4so)
+
+        def run():
+            for filename in pdfs:
+                path = os.path.join(input_dir, filename)
+                try:
+                    serial = extract_fn(path)
+                    if serial:
+                        line, tag = f"  {filename}  →  {serial}.pdf", 'ok'
+                    else:
+                        line, tag = f"  {filename}  →  OCR thất bại", 'err'
+                except Exception as e:
+                    line, tag = f"  {filename}  →  Lỗi: {e}", 'err'
+                self.after(0, lambda l=line, t=tag: self._pr_insert(l, t))
+            self.after(0, lambda: self._pr_insert("─ Xong ─", 'muted'))
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _on_close(self):
         self.stop_event.set()
